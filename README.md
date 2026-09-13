@@ -2,6 +2,29 @@
 
 一个供多个应用共用的本地消息发送服务。应用通过 HTTP 提交消息，服务将消息持久化到 SQLite，再异步投递到钉钉机器人、飞书机器人或 SMTP 邮箱。管理网页可配置渠道、测试发送、查看记录并手动重试失败投递。
 
+## 界面预览
+
+以下截图取自当前部署版本的页面。管理后台使用演示数据展示界面，不包含实际渠道、消息或凭据。
+
+**消息中心概览**：查看发送统计、最近消息和渠道状态。
+
+![消息中心概览](docs/screenshots/overview.png)
+
+**发送测试**：填写消息并选择钉钉、飞书或邮件渠道。
+
+![发送测试页面](docs/screenshots/compose.png)
+
+**渠道管理**：统一维护各应用共享的发送出口。
+
+![渠道管理页面](docs/screenshots/channels.png)
+
+<details>
+<summary>查看登录页面</summary>
+
+![登录页面](docs/screenshots/login.png)
+
+</details>
+
 ## 本机启动
 
 需要 Python 3.11+。在项目目录运行：
@@ -18,7 +41,7 @@ PYTHONPATH=.deps python3 -m app
 
 查看容器日志可运行 `docker compose logs -f message-manager`。应用和 HTTP 访问日志使用北京时间（UTC+08:00）的完整时间戳；提交、投递成功和失败都会记录消息或投递 ID，Webhook 凭据不会写入日志。管理后台的「发送测试」会等待投递结果并显示失败原因，完整历史保留在「发送记录」。
 
-当前主机已将容器接入统一 Nginx 网关，统一监听 80/443 和备用的 1080/1443；项目容器仅将 `.env` 中的端口映射到宿主机回环地址，供同机应用调用。推荐使用 `https://message-sender.nas.haiqingd.top:1443` 访问管理后台，此入口使用有效的域名证书，站点配置位于 `/home/haiqingd/services/nginx-gateway/sites/message-sender.conf`。原入口 `message-manager.nas.haiqingd.top` 仍可访问，但其 HTTPS 使用临时自签名证书，浏览器会提示不受信任。公网 80 端口被拦；1080 是明文 HTTP，不要在不可信网络中通过该入口提交管理员令牌或 API Key。本机应用可继续使用 `127.0.0.1` 入口。
+当前主机已将容器接入统一 Nginx 网关，统一监听 80/443 和备用的 1080/1443；项目容器仅将 `.env` 中的端口映射到宿主机回环地址，供同机应用调用。推荐使用 `https://message-sender.nas.haiqingd.top/` 访问管理后台，备用 HTTPS 端口为 1443；此入口使用有效的域名证书，站点配置位于 `/home/haiqingd/services/nginx-gateway/sites/message-sender.conf`。原入口 `message-manager.nas.haiqingd.top` 仍可访问，但其 HTTPS 使用临时自签名证书，浏览器会提示不受信任。公网 80 端口被拦；1080 是明文 HTTP，不要在不可信网络中通过该入口提交管理员令牌或 API Key。本机应用可继续使用 `127.0.0.1` 入口。
 
 ## 配置渠道
 
