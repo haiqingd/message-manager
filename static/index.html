@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111827">
+  <title>讯枢 · 消息发送管理</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="login" class="login-screen">
+    <div class="login-card">
+      <div class="brand-mark">✳</div>
+      <p class="eyebrow">MESSAGE INFRASTRUCTURE</p>
+      <h1>欢迎来到讯枢</h1>
+      <p class="muted">统一管理应用消息的发送渠道、状态和记录。</p>
+      <form id="login-form">
+        <label for="admin-token">管理员令牌</label>
+        <input id="admin-token" type="password" autocomplete="current-password" placeholder="输入 .env 中的 ADMIN_TOKEN" required>
+        <button class="button primary wide" type="submit">进入管理后台 <span>→</span></button>
+      </form>
+      <p id="login-error" class="form-error"></p>
+      <p class="login-footnote">首次使用？运行 <code>python -m app.bootstrap</code> 生成本地配置。</p>
+    </div>
+  </div>
+
+  <div id="shell" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand"><span class="brand-mark small">✳</span><div><strong>讯枢</strong><small>MESSAGE MANAGER</small></div></div>
+      <div class="nav-label">工作空间</div>
+      <nav id="nav">
+        <button class="nav-item active" data-page="overview"><span class="nav-icon">◫</span>概览</button>
+        <button class="nav-item" data-page="compose"><span class="nav-icon">↗</span>发送测试</button>
+        <button class="nav-item" data-page="channels"><span class="nav-icon">◇</span>渠道管理</button>
+        <button class="nav-item" data-page="messages"><span class="nav-icon">≡</span>发送记录</button>
+        <button class="nav-item" data-page="api"><span class="nav-icon">⌘</span>API 接入</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="live-dot"></span> 本地服务运行中 <button id="logout" title="退出登录">退出</button></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <strong id="current-page">概览</strong></div><div class="top-actions"><span id="today"></span><span class="avatar">管</span></div></header>
+      <div class="content">
+        <section id="overview" class="page active">
+          <div class="page-heading"><div><p class="eyebrow">OVERVIEW</p><h1>消息中心概览</h1><p>所有应用的消息，从这里统一发出。</p></div><button class="button primary" data-go="compose">＋ 发送测试消息</button></div>
+          <div class="hero"><div><span class="hero-kicker"><span class="live-dot light"></span> 系统运行正常</span><h2>一次接入，多渠道触达。</h2><p>通过统一 HTTP 接口，把通知可靠地送达钉钉、飞书和邮箱。</p><button class="hero-link" data-go="api">查看接入方式 <span>↗</span></button></div><div class="hero-art"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="hero-core">✳</div><div class="float-node n1">✉</div><div class="float-node n2">◈</div><div class="float-node n3">◇</div></div></div>
+          <div class="stats-grid"><div class="stat-card"><span>活跃渠道</span><strong id="stat-channels">—</strong><small>已启用的发送通道</small><i class="stat-icon blue">◇</i></div><div class="stat-card"><span>消息总数</span><strong id="stat-messages">—</strong><small>已接收的请求</small><i class="stat-icon violet">↗</i></div><div class="stat-card"><span>成功送达</span><strong id="stat-sent">—</strong><small>已完成的投递</small><i class="stat-icon green">✓</i></div><div class="stat-card"><span>待发送 / 失败</span><strong><em id="stat-pending">—</em> <b>/</b> <em id="stat-failed">—</em></strong><small>需要留意的状态</small><i class="stat-icon amber">◷</i></div></div>
+          <div class="section-grid"><div class="panel"><div class="panel-heading"><div><h3>最近发送</h3><p>最新的消息请求与投递情况</p></div><button class="text-button" data-go="messages">查看全部 →</button></div><div id="recent-messages" class="list-area"></div></div><div class="panel"><div class="panel-heading"><div><h3>渠道状态</h3><p>当前可用的消息出口</p></div><button class="text-button" data-go="channels">管理渠道 →</button></div><div id="channel-preview" class="list-area"></div></div></div>
+        </section>
+
+        <section id="compose" class="page"><div class="page-heading"><div><p class="eyebrow">QUICK SEND</p><h1>发送测试消息</h1><p>选择渠道并提交消息，系统会在后台发送。</p></div></div><div class="two-column"><div class="panel form-panel"><form id="send-form"><div class="field"><label for="send-title">消息标题 <span>*</span></label><input id="send-title" maxlength="200" placeholder="例如：服务状态提醒" required></div><div class="field"><label for="send-body">消息内容 <span>*</span></label><textarea id="send-body" rows="8" maxlength="20000" placeholder="输入要发送的消息内容…" required></textarea><small>支持纯文本；钉钉渠道以 Markdown 消息发送。</small></div><div class="field"><label>发送渠道 <span>*</span></label><div id="destination-options" class="destination-options"></div></div><div id="email-recipients-wrap" class="field hidden"><label for="email-recipients">邮箱收件人</label><input id="email-recipients" placeholder="多个地址用英文逗号分隔；留空使用渠道默认收件人"><small>仅对选中的邮箱渠道生效。</small></div><button class="button primary" type="submit">↗ 加入发送队列</button><p id="send-result" class="inline-message"></p></form></div><div class="side-note"><div class="note-icon">◷</div><h3>可靠的异步发送</h3><p>HTTP 请求被接收后会立即返回消息 ID，实际发送在后台完成。失败投递会自动重试，最终状态可在发送记录中查看。</p><div class="note-line"></div><h4>提示</h4><p>首次发送前请先到「渠道管理」中配置至少一个渠道。</p><button class="text-button" data-go="channels">前往渠道管理 →</button></div></div></section>
+
+        <section id="channels" class="page"><div class="page-heading"><div><p class="eyebrow">CHANNELS</p><h1>渠道管理</h1><p>配置与维护钉钉、飞书和邮件发送通道。</p></div><button id="add-channel" class="button primary">＋ 添加渠道</button></div><div class="panel"><div class="panel-heading"><div><h3>所有渠道</h3><p>凭据加密保存在本地数据库中</p></div><span id="channel-count" class="count-badge">0 个渠道</span></div><div id="channel-list" class="channel-list"></div></div></section>
+
+        <section id="messages" class="page"><div class="page-heading"><div><p class="eyebrow">DELIVERY LOG</p><h1>发送记录</h1><p>追踪每条消息的发送结果，并重试失败投递。</p></div><button id="refresh-messages" class="button secondary">↻ 刷新记录</button></div><div class="panel"><div class="panel-heading"><div><h3>消息历史</h3><p>按提交时间从新到旧排序</p></div><span id="message-count" class="count-badge">0 条消息</span></div><div id="message-list" class="message-list"></div><div class="pagination"><button id="prev-page" class="button secondary small-button">上一页</button><span id="page-info">第 1 页</span><button id="next-page" class="button secondary small-button">下一页</button></div></div></section>
+
+        <section id="api" class="page"><div class="page-heading"><div><p class="eyebrow">DEVELOPER ACCESS</p><h1>API 接入</h1><p>让其他本地应用通过统一接口发送消息。</p></div><a class="button secondary" href="/docs" target="_blank" rel="noopener">查看交互式文档 ↗</a></div><div class="api-layout"><div class="panel api-panel"><div class="step-label">01 · 认证</div><h3>使用 API Key</h3><p>在请求头中加入 <code>X-API-Key</code>。密钥位于本地 <code>.env</code> 文件的 <code>MESSAGE_API_KEY</code>，请勿放入前端代码。</p><div class="step-label">02 · 发送</div><h3>提交消息</h3><p>向 <code>POST /api/v1/messages</code> 发送 JSON。一个请求可同时发往多个渠道。</p><div class="code-head"><span>cURL 示例</span><button id="copy-example" class="text-button">复制</button></div><pre id="api-example"></pre><div class="step-label">03 · 查询结果</div><h3>检查投递状态</h3><p>接口返回 <code>202</code> 和消息 ID。使用 <code>GET /api/v1/messages/{id}</code> 查询各渠道的投递状态。</p></div><div class="side-note"><div class="note-icon">⌘</div><h3>接入约定</h3><p>每个渠道都有固定的 ID，可在渠道管理中复制。建议业务应用为同一事件设置唯一的 <code>idempotency_key</code>，避免重复发送。</p><div class="note-line"></div><p>默认仅监听 <code>127.0.0.1</code>，端口可在 <code>.env</code> 中设置。跨机器部署时请配置 HTTPS 反向代理和访问控制。</p></div></div></section>
+      </div>
+    </main>
+  </div>
+
+  <div id="channel-modal" class="modal-backdrop hidden"><div class="modal"><div class="modal-head"><div><p class="eyebrow">CHANNEL SETUP</p><h2 id="modal-title">添加发送渠道</h2></div><button id="close-modal" class="icon-button" aria-label="关闭">×</button></div><form id="channel-form"><input type="hidden" id="channel-id"><div class="field"><label for="channel-name">渠道名称 <span>*</span></label><input id="channel-name" placeholder="例如：运维告警群" maxlength="80" required></div><div class="field"><label for="channel-kind">渠道类型 <span>*</span></label><select id="channel-kind"><option value="dingtalk">钉钉机器人</option><option value="feishu">飞书机器人</option><option value="email">SMTP 邮件</option></select></div><div id="channel-fields"></div><div class="checkbox-row"><label><input id="channel-enabled" type="checkbox" checked> 启用该渠道</label></div><p id="channel-error" class="form-error"></p><div class="modal-actions"><button id="cancel-modal" type="button" class="button secondary">取消</button><button type="submit" class="button primary">保存渠道</button></div></form></div></div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
