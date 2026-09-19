@@ -7,11 +7,22 @@ from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 
-from .models import ChannelInput, MessageInput
+from .models import ChannelInput, MessageInput, RouteInput
 from .senders import valid_email
 
 
-SECRET_FIELDS = {"dingtalk": {"webhook_url", "secret"}, "feishu": {"webhook_url", "secret"}, "email": {"password"}}
+SECRET_FIELDS = {
+    "dingtalk": {"webhook_url", "secret"},
+    "feishu": {"webhook_url", "secret"},
+    "qq": {"client_secret"},
+    "email": {"password"},
+}
+
+ROUTE_SECRET_FIELDS = {"webhook_url"}
+
+# The seeded catch-all rule keeps "auto-create a channel" working out of the
+# box but evaluates after every user-created rule.
+DEFAULT_ROUTE_POSITION = 1000000
 
 
 class Database:
@@ -52,7 +63,39 @@ class Database:
                 CREATE INDEX IF NOT EXISTS deliveries_due ON deliveries(status, next_attempt_at);
                 CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(message_id);
                 CREATE INDEX IF NOT EXISTS messages_created ON messages(created_at DESC);
+                CREATE TABLE IF NOT EXISTS qq_routes (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL,
+                    position INTEGER NOT NULL, event_types TEXT NOT NULL,
+                    chat_type TEXT NOT NULL DEFAULT 'any', openid TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL, config_encrypted BLOB NOT NULL,
+                    created_at REAL NOT NULL, updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS qq_events (
+                    id TEXT PRIMARY KEY, received_at REAL NOT NULL, app_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL, chat_type TEXT, openid TEXT, payload_json TEXT NOT NULL,
+                    route_id TEXT, action TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', detail TEXT
+                );
+                CREATE INDEX IF NOT EXISTS qq_events_received ON qq_events(received_at DESC);
+                CREATE TABLE IF NOT EXISTS qq_reply_seq (
+                    msg_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS qq_parties (
+                    id TEXT PRIMARY KEY, group_openid TEXT NOT NULL, day TEXT NOT NULL,
+                    creator_openid TEXT NOT NULL, creator_name TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL, UNIQUE(group_openid, day)
+                );
+                CREATE TABLE IF NOT EXISTS qq_party_members (
+                    party_id TEXT NOT NULL REFERENCES qq_parties(id),
+                    member_openid TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+                    expected_time TEXT NOT NULL DEFAULT '', joined_at REAL NOT NULL,
+                    UNIQUE(party_id, member_openid)
+                );
             """)
+            if conn.execute("SELECT COUNT(*) FROM qq_routes").fetchone()[0] == 0:
+                conn.execute("INSERT INTO qq_routes VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                             (str(uuid.uuid4()), "兜底：自动创建渠道", 1, DEFAULT_ROUTE_POSITION,
+                              json.dumps(["*"]), "any", "", "channel",
+                              self.cipher.encrypt(b"{}"), time.time(), time.time()))
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
             if "source" not in columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'default'")
@@ -115,6 +158,184 @@ class Database:
             row = conn.execute("SELECT * FROM channels WHERE id=?", (channel_id,)).fetchone()
             return self._channel(row, include_config) if row else None
 
+    def find_qq_channel(self, openid: str, chat_type: str = "group"):
+        with self.connect() as conn:
+            for row in conn.execute("SELECT * FROM channels WHERE kind='qq'"):
+                config = self._decode(row)
+                if str(config.get("group_openid") or "").strip() == openid and str(config.get("chat_type") or "group") == chat_type:
+                    return self._channel(row)
+        return None
+
+    def qq_credentials(self, app_id: str) -> dict:
+        """Credentials of any stored QQ channel for this app, so the callback
+        can verify signatures and stamp new channels without an .env entry."""
+        with self.connect() as conn:
+            for row in conn.execute("SELECT * FROM channels WHERE kind='qq'"):
+                config = self._decode(row)
+                if str(config.get("app_id") or "").strip() == app_id and str(config.get("client_secret") or "").strip():
+                    return {"app_id": app_id, "client_secret": str(config["client_secret"])}
+        return {"app_id": app_id, "client_secret": ""}
+
+    def _route(self, row, include_config=False):
+        result = {key: row[key] for key in ("id", "name", "position", "chat_type", "openid", "action")}
+        result["enabled"] = bool(row["enabled"])
+        result["event_types"] = json.loads(row["event_types"])
+        config = json.loads(self.cipher.decrypt(row["config_encrypted"]))
+        if include_config:
+            result["config"] = config
+        else:
+            result["config"] = {key: ("" if key in ROUTE_SECRET_FIELDS else value) for key, value in config.items()}
+            result["configured_secrets"] = [key for key in ROUTE_SECRET_FIELDS if config.get(key)]
+        return result
+
+    def list_qq_routes(self):
+        with self.connect() as conn:
+            return [self._route(row) for row in conn.execute("SELECT * FROM qq_routes ORDER BY position, created_at")]
+
+    def get_qq_route(self, route_id, include_config=False):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM qq_routes WHERE id=?", (route_id,)).fetchone()
+            return self._route(row, include_config) if row else None
+
+    def save_qq_route(self, data: RouteInput, route_id=None):
+        now = time.time()
+        with self.connect() as conn:
+            old = conn.execute("SELECT * FROM qq_routes WHERE id=?", (route_id,)).fetchone() if route_id else None
+            if route_id and not old:
+                return None
+            config = dict(data.config)
+            if old:
+                previous = json.loads(self.cipher.decrypt(old["config_encrypted"]))
+                for key in ROUTE_SECRET_FIELDS:
+                    if not config.get(key):
+                        config[key] = previous.get(key, "")
+            encrypted = self.cipher.encrypt(json.dumps(config).encode())
+            if old:
+                conn.execute("""UPDATE qq_routes SET name=?,enabled=?,event_types=?,chat_type=?,openid=?,action=?,
+                    config_encrypted=?,updated_at=? WHERE id=?""",
+                             (data.name, int(data.enabled), json.dumps(data.event_types), data.chat_type,
+                              data.openid.strip(), data.action, encrypted, now, route_id))
+            else:
+                position = conn.execute("SELECT MIN(1000000 - 1, COALESCE(MAX(position), 0) + 1) FROM qq_routes").fetchone()[0]
+                route_id = str(uuid.uuid4())
+                conn.execute("INSERT INTO qq_routes VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                             (route_id, data.name, int(data.enabled), position, json.dumps(data.event_types),
+                              data.chat_type, data.openid.strip(), data.action, encrypted, now, now))
+        return self.get_qq_route(route_id)
+
+    def delete_qq_route(self, route_id):
+        with self.connect() as conn:
+            cursor = conn.execute("DELETE FROM qq_routes WHERE id=?", (route_id,))
+            return cursor.rowcount > 0
+
+    def record_qq_event(self, app_id, event_type, chat_type, openid, payload, route_id, action):
+        event_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            conn.execute("INSERT INTO qq_events VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                         (event_id, time.time(), app_id, event_type, chat_type, openid,
+                          json.dumps(payload, ensure_ascii=False), route_id, action, "pending", None))
+        return event_id
+
+    def finish_qq_event(self, event_id, status, detail=None):
+        with self.connect() as conn:
+            conn.execute("UPDATE qq_events SET status=?,detail=? WHERE id=?", (status, str(detail)[:500] if detail else None, event_id))
+
+    def list_qq_events(self, limit=50, offset=0):
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM qq_events ORDER BY received_at DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+            total = conn.execute("SELECT COUNT(*) FROM qq_events").fetchone()[0]
+        items = [{
+            "id": row["id"], "received_at": row["received_at"], "app_id": row["app_id"],
+            "event_type": row["event_type"], "chat_type": row["chat_type"], "openid": row["openid"],
+            "payload": json.loads(row["payload_json"]), "route_id": row["route_id"],
+            "action": row["action"], "status": row["status"], "detail": row["detail"],
+        } for row in rows]
+        return {"items": items, "total": total}
+
+    def clear_qq_events(self):
+        with self.connect() as conn:
+            cursor = conn.execute("DELETE FROM qq_events")
+            return cursor.rowcount
+
+    def latest_qq_interaction_msgid(self, openid: str, chat_type: str, max_age: float = 3600):
+        """Message id of the newest inbound group/@ or private message for a
+        target, within the passive-reply window; None when the window is gone."""
+        with self.connect() as conn:
+            row = conn.execute("""SELECT payload_json FROM qq_events
+                WHERE event_type IN ('GROUP_AT_MESSAGE_CREATE','C2C_MESSAGE_CREATE')
+                  AND chat_type=? AND openid=? AND received_at>=?
+                ORDER BY received_at DESC LIMIT 1""",
+                (chat_type, openid, time.time() - max_age)).fetchone()
+        if not row:
+            return None
+        message_id = (json.loads(row["payload_json"]).get("d") or {}).get("id")
+        return str(message_id) if message_id else None
+
+    def claim_qq_reply_seq(self, msg_id: str, limit: int = 4):
+        """Reserve the next passive-reply slot for an inbound message.
+        Returns 1..limit, or None once the message is fully replied to."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT seq FROM qq_reply_seq WHERE msg_id=?", (msg_id,)).fetchone()
+            if row:
+                if row["seq"] >= limit:
+                    return None
+                seq = row["seq"] + 1
+                conn.execute("UPDATE qq_reply_seq SET seq=?,updated_at=? WHERE msg_id=?",
+                             (seq, time.time(), msg_id))
+            else:
+                seq = 1
+                conn.execute("INSERT INTO qq_reply_seq VALUES (?,?,?)", (msg_id, seq, time.time()))
+            return seq
+
+    def qq_party_today(self, group_openid: str):
+        day = time.strftime("%Y-%m-%d", time.localtime())
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM qq_parties WHERE group_openid=? AND day=?",
+                               (group_openid, day)).fetchone()
+            return dict(row) if row else None
+
+    def qq_party_ensure(self, group_openid: str, creator_openid: str, creator_name: str = "") -> dict:
+        day = time.strftime("%Y-%m-%d", time.localtime())
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM qq_parties WHERE group_openid=? AND day=?",
+                               (group_openid, day)).fetchone()
+            if not row:
+                conn.execute("INSERT INTO qq_parties VALUES (?,?,?,?,?,?)",
+                             (str(uuid.uuid4()), group_openid, day, creator_openid,
+                              creator_name, time.time()))
+                row = conn.execute("SELECT * FROM qq_parties WHERE group_openid=? AND day=?",
+                                   (group_openid, day)).fetchone()
+            elif creator_name and not row["creator_name"] and row["creator_openid"] == creator_openid:
+                conn.execute("UPDATE qq_parties SET creator_name=? WHERE id=?", (creator_name, row["id"]))
+                row = conn.execute("SELECT * FROM qq_parties WHERE id=?", (row["id"],)).fetchone()
+        return dict(row)
+
+    def qq_party_join(self, party_id: str, member_openid: str, name: str, expected_time: str):
+        with self.connect() as conn:
+            existing = conn.execute("SELECT name, expected_time FROM qq_party_members WHERE party_id=? AND member_openid=?",
+                                    (party_id, member_openid)).fetchone()
+            if existing:
+                conn.execute("UPDATE qq_party_members SET name=?,expected_time=? WHERE party_id=? AND member_openid=?",
+                             (name or existing["name"], expected_time or existing["expected_time"],
+                              party_id, member_openid))
+            else:
+                conn.execute("INSERT INTO qq_party_members VALUES (?,?,?,?,?)",
+                             (party_id, member_openid, name, expected_time, time.time()))
+
+    def qq_party_leave(self, party_id: str, member_openid: str) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute("DELETE FROM qq_party_members WHERE party_id=? AND member_openid=?",
+                                  (party_id, member_openid))
+            return cursor.rowcount > 0
+
+    def qq_party_members(self, party_id: str) -> list[dict]:
+        with self.connect() as conn:
+            return [{"member_openid": row["member_openid"], "name": row["name"],
+                     "expected_time": row["expected_time"]}
+                    for row in conn.execute("SELECT * FROM qq_party_members WHERE party_id=? ORDER BY joined_at",
+                                            (party_id,))]
+
     def save_channel(self, data: ChannelInput, channel_id=None):
         now = time.time()
         with self.connect() as conn:
@@ -166,6 +387,8 @@ class Database:
                     raise ValueError("Invalid email recipient address")
                 if row["kind"] != "email" and destination.recipients:
                     raise ValueError("Recipients are only supported for email channels")
+                if row["kind"] == "qq" and not str(self._decode(row).get("group_openid") or "").strip():
+                    raise ValueError(f"QQ channel {destination.channel_id} has no target OpenID; it only identifies the bot")
             message_id = str(uuid.uuid4())
             conn.execute("""INSERT INTO messages (id, source, title, body, idempotency_key, created_at)
                 VALUES (?,?,?,?,?,?)""", (message_id, data.source, data.title, data.body, data.idempotency_key, now))

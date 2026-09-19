@@ -64,6 +64,30 @@ def test_feishu_credentials_are_saved_but_not_echoed(tmp_path):
         assert saved["config"]["secret"] == "private-signing-key"
 
 
+def test_qq_credentials_are_saved_but_not_echoed(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        channel = add_channel(client, "qq", {
+            "app_id": "123456",
+            "client_secret": "private-qq-secret",
+            "group_openid": "group-openid",
+        })
+        assert channel["config"] == {
+            "app_id": "123456",
+            "client_secret": "",
+            "group_openid": "group-openid",
+        }
+        assert channel["configured_secrets"] == ["client_secret"]
+        updated = client.put(f"/api/admin/channels/{channel['id']}", headers=admin_headers(), json={
+            "name": "QQ Ops Updated", "kind": "qq", "enabled": True,
+            "config": {"app_id": "123456", "client_secret": "", "group_openid": "group-openid"},
+        })
+        assert updated.status_code == 200
+        saved = app.state.db.get_channel(channel["id"], include_config=True)
+        assert saved["config"]["client_secret"] == "private-qq-secret"
+        assert b"private-qq-secret" not in (tmp_path / "messages.db").read_bytes()
+
+
 def test_queue_idempotency_and_validation(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:

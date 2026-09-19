@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 
-ChannelType = Literal["dingtalk", "feishu", "email"]
+ChannelType = Literal["dingtalk", "feishu", "qq", "email"]
 
 
 class ChannelInput(BaseModel):
@@ -11,6 +11,16 @@ class ChannelInput(BaseModel):
     kind: ChannelType
     enabled: bool = True
     config: dict[str, object]
+
+
+class RouteInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    enabled: bool = True
+    event_types: list[str] = Field(min_length=1, max_length=8)
+    chat_type: Literal["any", "group", "user"] = "any"
+    openid: str = Field(default="", max_length=128)
+    action: Literal["log", "channel", "forward", "party"]
+    config: dict[str, object] = Field(default_factory=dict)
 
 
 class Destination(BaseModel):

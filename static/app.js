@@ -1,10 +1,13 @@
-const state = { token: sessionStorage.getItem('adminToken') || '', channels: [], messages: [], offset: 0, total: 0, page: 'overview' };
+const state = { token: sessionStorage.getItem('adminToken') || '', channels: [], messages: [], routes: [], qqEvents: [], offset: 0, total: 0, page: 'overview' };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const names = { overview:'概览', compose:'发送测试', channels:'渠道管理', messages:'发送记录', api:'API 接入' };
-const kindNames = { dingtalk:'钉钉机器人', feishu:'飞书机器人', email:'SMTP 邮件' };
-const kindIcons = { dingtalk:'◈', feishu:'◇', email:'✉' };
+const names = { overview:'概览', compose:'发送测试', channels:'渠道管理', qqcb:'QQ 回调', messages:'发送记录', api:'API 接入' };
+const kindNames = { dingtalk:'钉钉机器人', feishu:'飞书机器人', qq:'QQ 机器人', email:'SMTP 邮件' };
+const kindIcons = { dingtalk:'◈', feishu:'◇', qq:'Q', email:'✉' };
 const statusNames = { sent:'已送达', pending:'待发送', sending:'发送中', failed:'发送失败' };
+const qqEventNames = { '*':'任意事件', GROUP_AT_MESSAGE_CREATE:'群 @ 消息', GROUP_ADD_ROBOT:'机器人进群', C2C_MESSAGE_CREATE:'私聊消息', FRIEND_ADD:'好友添加' };
+const qqChatNames = { any:'不限', group:'群聊', user:'私聊' };
+const qqActionNames = { channel:'创建渠道', forward:'转发插槽', log:'仅记录', party:'组队游戏' };
 
 async function request(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { 'Authorization': `Bearer ${state.token}`, ...(options.body ? {'Content-Type':'application/json'} : {}), ...options.headers } });
@@ -16,7 +19,7 @@ function toast(message) { const item=$('#toast'); item.textContent=message; item
 function formatTime(value) { return new Date(value*1000).toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 function overallStatus(message) { const values=message.deliveries.map(item=>item.status); return values.includes('failed')?'failed':values.every(item=>item==='sent')?'sent':values.includes('sending')?'sending':'pending'; }
 function showPage(page) { state.page=page; document.querySelectorAll('.page').forEach(item=>item.classList.toggle('active',item.id===page)); document.querySelectorAll('.nav-item').forEach(item=>item.classList.toggle('active',item.dataset.page===page)); $('#current-page').textContent=names[page]; if(page==='api') renderApiExample(); else if(state.token) refresh().catch(error=>toast(`刷新失败：${error.message}`)); }
-async function refresh() { const [stats, channels, messages] = await Promise.all([request('/api/admin/stats'),request('/api/admin/channels'),request(`/api/admin/messages?limit=20&offset=${state.offset}`)]); state.channels=channels; state.messages=messages.items; state.total=messages.total; renderStats(stats); renderChannels(); renderMessages(); renderDestinations(); renderApiExample(); }
+async function refresh() { const [stats, channels, messages, routes, qqEvents] = await Promise.all([request('/api/admin/stats'),request('/api/admin/channels'),request(`/api/admin/messages?limit=20&offset=${state.offset}`),request('/api/admin/qq/routes'),request('/api/admin/qq/events?limit=50')]); state.channels=channels; state.messages=messages.items; state.total=messages.total; state.routes=routes; state.qqEvents=qqEvents.items; renderStats(stats); renderChannels(); renderMessages(); renderDestinations(); renderRoutes(); renderQqEvents(); renderApiExample(); }
 function renderStats(stats) { for(const key of ['channels','messages','sent','pending','failed']) $(`#stat-${key}`).textContent=stats[key]; }
 function renderChannels() {
   $('#channel-count').textContent=`${state.channels.length} 个渠道`;
@@ -24,6 +27,13 @@ function renderChannels() {
   $('#channel-preview').innerHTML=state.channels.length ? state.channels.slice(0,4).map(channel=>`<div class="preview-row"><span class="channel-icon ${channel.kind}">${kindIcons[channel.kind]}</span><div class="row-main"><strong>${escapeHtml(channel.name)}</strong><small>${kindNames[channel.kind]}</small></div><span class="status ${channel.enabled?'sent':'disabled'}">${channel.enabled?'正常':'停用'}</span></div>`).join('') : empty('添加渠道后，这里会显示状态。');
 }
 function empty(text) { return `<div class="empty"><span class="empty-icon">◇</span>${text}</div>`; }
+function renderRoutes() {
+  $('#route-count').textContent=`${state.routes.length} 条规则`;
+  $('#route-list').innerHTML=state.routes.length ? state.routes.map(route=>`<div class="channel-item"><div class="channel-meta"><strong>${escapeHtml(route.name)}</strong><small>${route.event_types.map(t=>qqEventNames[t]||t).join('、')} · ${qqChatNames[route.chat_type]}${route.openid?` · ${escapeHtml(route.openid)}`:''} → ${qqActionNames[route.action]}${route.action==='forward'?(route.configured_secrets?.includes('webhook_url')?'':'（未配置 URL）'):''}</small></div><span class="status ${route.enabled?'sent':'disabled'}">${route.enabled?'启用':'停用'}</span><div class="channel-actions"><button class="text-button" data-edit-route="${escapeHtml(route.id)}">编辑</button><button class="icon-button" data-delete-route="${escapeHtml(route.id)}" title="删除">×</button></div></div>`).join('') : empty('还没有路由规则；所有事件只会记录，不会触发任何插槽。');
+}
+function renderQqEvents() {
+  $('#qq-event-list').innerHTML=state.qqEvents.length ? state.qqEvents.map(event=>`<div class="message-card"><div class="message-head"><span class="row-icon">◈</span><div class="row-main"><strong>${escapeHtml(qqEventNames[event.event_type]||event.event_type)}</strong><small>${formatTime(event.received_at)} · App ${escapeHtml(event.app_id)}${event.openid?` · ${event.chat_type==='user'?'用户':'群'} ${escapeHtml(event.openid.slice(0,12))}…`:''}${event.payload?.d?.content?` · ${escapeHtml(String(event.payload.d.content).trim().slice(0,30))}`:''}</small></div><span class="status ${event.status==='ok'?'sent':event.status==='error'?'failed':'pending'}">${qqActionNames[event.action]||event.action} · ${event.status==='ok'?'成功':event.status==='error'?'失败':event.status}</span><span class="row-time">⌄</span></div><div class="message-details"><div class="message-body"><pre>${escapeHtml(JSON.stringify(event.payload,null,2))}</pre></div>${event.detail?`<p class="delivery-error">${escapeHtml(event.detail)}</p>`:''}</div></div>`).join('') : empty('还没有收到回调事件。在 QQ 平台配置回调地址并订阅事件后，这里会记录每一个请求。');
+}
 function renderMessages() {
   $('#message-count').textContent=`${state.total} 条消息`;
   $('#page-info').textContent=`第 ${Math.floor(state.offset/20)+1} 页`;
@@ -57,6 +67,11 @@ function renderChannelFields(channel = state.channels.find(item => item.id === $
   if (kind === 'dingtalk' || kind === 'feishu') {
     html += secretField('机器人 Webhook URL *', 'webhook_url', 'url', saved('webhook_url'), 'https://...', channel?.webhook_host || '');
     html += secretField('加签密钥（可选）', 'secret', 'password', saved('secret'), '机器人安全设置中的密钥');
+  } else if (kind === 'qq') {
+    html += field('机器人 AppID *', 'app_id', 'text', 'QQ 开放平台中的 AppID', config.app_id || '');
+    html += secretField('机器人 AppSecret *', 'client_secret', 'password', saved('client_secret'), 'QQ 开放平台中的 AppSecret');
+    html += `<div class="field"><label for="cfg-chat_type">聊天类型</label><select id="cfg-chat_type" data-config="chat_type"><option value="group" ${config.chat_type === 'user' ? '' : 'selected'}>群聊（群 OpenID）</option><option value="user" ${config.chat_type === 'user' ? 'selected' : ''}>私聊（用户 OpenID）</option></select></div>`;
+    html += field('目标 OpenID（可留空）', 'group_openid', 'text', '群消息事件中的 group_openid 或私聊事件中的 user_openid', config.group_openid || '', '留空时该渠道仅作为机器人身份，用于回调验签和给自动创建的渠道提供凭据；回调收到群聊/私聊消息后会按「QQ 回调」页的路由规则自动创建渠道。');
   } else {
     html += field('SMTP 服务器 *', 'host', 'text', 'smtp.example.com', config.host || '');
     html += field('端口 *', 'port', 'number', '587', config.port || 587);
@@ -71,6 +86,10 @@ function renderChannelFields(channel = state.channels.find(item => item.id === $
 
 function openChannelModal(id=null) { const channel=state.channels.find(item=>item.id===id); $('#channel-id').value=id||''; $('#modal-title').textContent=channel?'编辑发送渠道':'添加发送渠道'; $('#channel-name').value=channel?.name||''; $('#channel-kind').value=channel?.kind||'dingtalk'; $('#channel-enabled').checked=channel?.enabled??true; $('#channel-error').textContent=''; renderChannelFields(channel); $('#channel-modal').classList.remove('hidden'); $('#channel-name').focus(); }
 function closeChannelModal() { $('#channel-modal').classList.add('hidden'); }
+function renderRouteEventTypes(selected=['*']) { $('#route-event-types').innerHTML=Object.entries(qqEventNames).map(([value,label])=>`<label class="destination-option"><input type="checkbox" value="${value}" ${selected.includes(value)?'checked':''}><span>${escapeHtml(label)}</span></label>`).join(''); }
+function openRouteModal(id=null) { const route=state.routes.find(item=>item.id===id); $('#route-id').value=id||''; $('#route-modal-title').textContent=route?'编辑路由规则':'添加路由规则'; $('#route-name').value=route?.name||''; renderRouteEventTypes(route?.event_types||['*']); $('#route-chat-type').value=route?.chat_type||'any'; $('#route-openid').value=route?.openid||''; $('#route-action').value=route?.action||'channel'; $('#route-webhook').value=''; $('#route-md').value=route?.config?.markdown_template_id||''; $('#route-enabled').checked=route?.enabled??true; $('#route-error').textContent=''; $('#route-webhook-wrap').classList.toggle('hidden',$('#route-action').value!=='forward'); $('#route-md-wrap').classList.toggle('hidden',$('#route-action').value!=='party'); $('#route-modal').classList.remove('hidden'); $('#route-name').focus(); }
+function closeRouteModal() { $('#route-modal').classList.add('hidden'); }
+async function saveRoute(event) { event.preventDefault(); const id=$('#route-id').value; const event_types=[...document.querySelectorAll('#route-event-types input:checked')].map(input=>input.value); const config={}; if($('#route-action').value==='forward') config.webhook_url=$('#route-webhook').value.trim(); if($('#route-action').value==='party') config.markdown_template_id=$('#route-md').value.trim(); try { await request(id?`/api/admin/qq/routes/${id}`:'/api/admin/qq/routes',{method:id?'PUT':'POST',body:JSON.stringify({name:$('#route-name').value.trim(),enabled:$('#route-enabled').checked,event_types,chat_type:$('#route-chat-type').value,openid:$('#route-openid').value.trim(),action:$('#route-action').value,config})}); closeRouteModal(); await refresh(); toast(id?'规则已更新':'规则已添加'); } catch(error) { $('#route-error').textContent=error.message; } }
 async function saveChannel(event) { event.preventDefault(); const id=$('#channel-id').value; const kind=$('#channel-kind').value; const config={}; document.querySelectorAll('[data-config]').forEach(input=>{ config[input.dataset.config]=input.value.trim(); }); if(kind==='email'){ config.port=Number(config.port||587); config.default_recipients=config.default_recipients.split(',').map(x=>x.trim()).filter(Boolean); } try { await request(id?`/api/admin/channels/${id}`:'/api/admin/channels',{method:id?'PUT':'POST',body:JSON.stringify({name:$('#channel-name').value.trim(),kind,enabled:$('#channel-enabled').checked,config})}); closeChannelModal(); await refresh(); toast(id?'渠道已更新':'渠道已添加'); } catch(error) { $('#channel-error').textContent=error.message; } }
 async function watchDelivery(messageId, result) {
   for (let attempt = 0; attempt < 45; attempt++) {
@@ -108,6 +127,11 @@ $('#nav').addEventListener('click',event=>{const button=event.target.closest('[d
 document.body.addEventListener('click',event=>{const go=event.target.closest('[data-go]');if(go)showPage(go.dataset.go);});
 $('#add-channel').addEventListener('click',()=>openChannelModal()); $('#close-modal').addEventListener('click',closeChannelModal);$('#cancel-modal').addEventListener('click',closeChannelModal);$('#channel-modal').addEventListener('click',event=>{if(event.target.id==='channel-modal')closeChannelModal();});
 $('#channel-kind').addEventListener('change',()=>renderChannelFields());$('#channel-form').addEventListener('submit',saveChannel);$('#send-form').addEventListener('submit',sendMessage);
+$('#add-route').addEventListener('click',()=>openRouteModal());$('#close-route-modal').addEventListener('click',closeRouteModal);$('#cancel-route-modal').addEventListener('click',closeRouteModal);$('#route-modal').addEventListener('click',event=>{if(event.target.id==='route-modal')closeRouteModal();});$('#route-form').addEventListener('submit',saveRoute);$('#route-action').addEventListener('change',()=>{$('#route-webhook-wrap').classList.toggle('hidden',$('#route-action').value!=='forward');$('#route-md-wrap').classList.toggle('hidden',$('#route-action').value!=='party');});
+$('#route-list').addEventListener('click',async event=>{const edit=event.target.closest('[data-edit-route]');const remove=event.target.closest('[data-delete-route]');if(edit)openRouteModal(edit.dataset.editRoute);if(remove){const route=state.routes.find(item=>item.id===remove.dataset.deleteRoute);if(!confirm(`删除路由规则「${route.name}」？`))return;try{await request(`/api/admin/qq/routes/${route.id}`,{method:'DELETE'});await refresh();toast('规则已删除');}catch(error){toast(error.message);}}});
+$('#refresh-qq-events').addEventListener('click',async()=>{await refresh();toast('事件记录已更新');});
+$('#clear-qq-events').addEventListener('click',async()=>{if(!confirm('清空全部 QQ 回调事件记录？此操作不可恢复。'))return;try{const result=await request('/api/admin/qq/events',{method:'DELETE'});await refresh();toast(`已清空 ${result.cleared} 条记录`);}catch(error){toast(error.message);}});
+$('#qq-event-list').addEventListener('click',event=>{const head=event.target.closest('.message-head');if(head)head.parentElement.classList.toggle('expanded');});
 $('#destination-options').addEventListener('change',()=>{$('#email-recipients-wrap').classList.toggle('hidden',!document.querySelector('#destination-options input[data-kind="email"]:checked'));});
 $('#channel-list').addEventListener('click',async event=>{const edit=event.target.closest('[data-edit]');const remove=event.target.closest('[data-delete]');const copy=event.target.closest('[data-copy-id]');if(edit)openChannelModal(edit.dataset.edit);if(copy){await navigator.clipboard.writeText(copy.dataset.copyId);toast('渠道 ID 已复制');}if(remove){const channel=state.channels.find(c=>c.id===remove.dataset.delete);if(!confirm(`删除渠道「${channel.name}」？已有发送记录的渠道无法删除，可改为停用。`))return;try{await request(`/api/admin/channels/${channel.id}`,{method:'DELETE'});await refresh();toast('渠道已删除');}catch(error){toast(error.message);}}});
 $('#message-list').addEventListener('click',async event=>{const retry=event.target.closest('[data-retry]');if(retry){event.stopPropagation();try{await request(`/api/admin/deliveries/${retry.dataset.retry}/retry`,{method:'POST'});await refresh();toast('已重新加入队列');}catch(error){toast(error.message);}return;}const head=event.target.closest('.message-head');if(head)head.parentElement.classList.toggle('expanded');});

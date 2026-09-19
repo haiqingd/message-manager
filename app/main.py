@@ -5,12 +5,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .database import Database, SECRET_FIELDS
-from .models import ChannelInput, MessageInput
+from .database import Database, ROUTE_SECRET_FIELDS, SECRET_FIELDS
+from .models import ChannelInput, MessageInput, RouteInput
+from .qq_callback import CallbackRejected, handle_callback, validate_route
 from .senders import send, validate_config, valid_email
 from .settings import Settings, get_settings
 
@@ -34,7 +35,19 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
                     channel = db.get_channel(item["channel_id"], include_config=True)
                     if not channel or not channel["enabled"]:
                         raise RuntimeError("Channel is unavailable or disabled")
-                    await send(channel["kind"], channel["config"], item["title"], item["body"], json.loads(item["recipients_json"]))
+                    config = channel["config"]
+                    if channel["kind"] == "qq" and str(config.get("group_openid") or "").strip():
+                        # QQ closed bot push messages in 2025-04; deliver by
+                        # replying passively to the newest inbound message.
+                        openid = str(config["group_openid"]).strip()
+                        msg_id = db.latest_qq_interaction_msgid(openid, str(config.get("chat_type") or "group"))
+                        if msg_id:
+                            seq = db.claim_qq_reply_seq(msg_id)
+                            if seq:
+                                config = {**config, "msg_id": msg_id, "msg_seq": seq}
+                            else:
+                                raise RuntimeError("QQ 被动回复次数已用完（同一条消息最多回复 4 次），请先在 QQ 里重新 @ 机器人")
+                    await send(channel["kind"], config, item["title"], item["body"], json.loads(item["recipients_json"]))
                 except Exception as exc:
                     logger.warning("Delivery %s via channel %s failed (attempt %s/%s): %s", item["id"], item["channel_id"], item["attempts"] + 1, item["max_attempts"], exc)
                     db.finish_delivery(item["id"], item["attempts"] + 1, item["max_attempts"], str(exc))
@@ -74,6 +87,61 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     @app.get("/api/health")
     def health():
         return {"status": "ok"}
+
+    @app.post("/api/qq/callback/{app_id}")
+    async def qq_callback(app_id: str, request: Request):
+        # Called by the QQ open platform; authenticated by the Ed25519 signature
+        # the platform derives from the bot's AppSecret, not by our admin token.
+        raw_body = await request.body()
+        try:
+            return await handle_callback(db, app_id, raw_body,
+                                         request.headers.get("x-signature-ed25519", ""),
+                                         request.headers.get("x-signature-timestamp", ""))
+        except CallbackRejected as exc:
+            logger.warning("QQ callback for app %s rejected (%s): %s", app_id, exc.status, exc)
+            raise HTTPException(exc.status, str(exc)) from exc
+
+    @app.get("/api/admin/qq/routes", dependencies=[Depends(require_admin)])
+    def qq_routes():
+        return db.list_qq_routes()
+
+    def save_route(data: RouteInput, route_id: str | None = None):
+        existing = db.get_qq_route(route_id, include_config=True) if route_id else None
+        if route_id and not existing:
+            raise HTTPException(404, "Route not found")
+        config = dict(data.config)
+        if existing:
+            for key in ROUTE_SECRET_FIELDS:
+                if not config.get(key):
+                    config[key] = existing["config"].get(key, "")
+        try:
+            validate_route(data, config)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        data.config = config
+        return db.save_qq_route(data, route_id)
+
+    @app.post("/api/admin/qq/routes", status_code=201, dependencies=[Depends(require_admin)])
+    def create_route(data: RouteInput):
+        return save_route(data)
+
+    @app.put("/api/admin/qq/routes/{route_id}", dependencies=[Depends(require_admin)])
+    def update_route(route_id: str, data: RouteInput):
+        return save_route(data, route_id)
+
+    @app.delete("/api/admin/qq/routes/{route_id}", dependencies=[Depends(require_admin)])
+    def delete_route(route_id: str):
+        if not db.delete_qq_route(route_id):
+            raise HTTPException(404, "Route not found")
+        return {"deleted": True}
+
+    @app.get("/api/admin/qq/events", dependencies=[Depends(require_admin)])
+    def qq_events(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
+        return db.list_qq_events(limit, offset)
+
+    @app.delete("/api/admin/qq/events", dependencies=[Depends(require_admin)])
+    def clear_qq_events():
+        return {"cleared": db.clear_qq_events()}
 
     @app.post("/api/v1/messages", status_code=202, dependencies=[Depends(require_api_key)])
     def submit_message(data: MessageInput):
