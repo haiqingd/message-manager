@@ -6,3 +6,5 @@
 .saved-secret small{display:block;color:#6e9380;font-size:10px;line-height:1.5;margin-top:3px}
 .destination-option input[type="checkbox"]{width:16px;height:16px;flex:0 0 16px;margin:0;padding:0;accent-color:#6172df;cursor:pointer}
 .panel-tools{display:flex;align-items:center;gap:12px}
+
+.subscription-item{display:flex;align-items:center;gap:16px;padding:22px 26px;border-bottom:1px solid #edf0f6}.subscription-item:last-child{border-bottom:0}.subscription-item .channel-meta{min-width:0}.subscription-item small{overflow-wrap:anywhere}.subscription-item .channel-actions{flex-wrap:wrap}#subscription-destinations input[data-subscription-recipients]{font-size:11px;margin-top:6px}button:disabled{cursor:default;opacity:.5}@media(max-width:750px){.subscription-item{flex-wrap:wrap;padding:15px}.subscription-item .channel-meta{flex-basis:100%}}

@@ -10,10 +10,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .database import Database, ROUTE_SECRET_FIELDS, SECRET_FIELDS
-from .models import ChannelInput, MessageInput, RouteInput
+from .models import ChannelInput, MessageInput, RouteInput, SubscriptionInput
 from .qq_callback import CallbackRejected, handle_callback, validate_route
 from .senders import send, validate_config, valid_email
 from .settings import Settings, get_settings
+from .subscriptions import PollRateLimited, SubscriptionPoller, validate_subscription
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ STATIC = Path(__file__).parent.parent / "static"
 def create_app(settings: Settings | None = None, start_worker: bool = True) -> FastAPI:
     settings = settings or get_settings()
     db = Database(settings.database_path, settings.encryption_key)
+    poller = SubscriptionPoller(db)
 
     async def worker():
         while True:
@@ -62,18 +64,18 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        task = asyncio.create_task(worker()) if start_worker else None
-        yield
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        tasks = [asyncio.create_task(worker()), asyncio.create_task(poller.run())] if start_worker else []
+        try:
+            yield
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(title="Message Manager", version="0.1.0", lifespan=lifespan)
     app.state.db = db
     app.state.settings = settings
+    app.state.subscription_poller = poller
 
     def require_admin(authorization: str = Header(default="")):
         scheme, _, token = authorization.partition(" ")
@@ -172,6 +174,51 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     def channels():
         return db.list_channels()
 
+    @app.get("/api/admin/subscriptions", dependencies=[Depends(require_admin)])
+    def subscriptions():
+        return db.list_subscriptions()
+
+    def save_subscription(data: SubscriptionInput, subscription_id=None):
+        existing = db.get_subscription(subscription_id, include_config=True) if subscription_id else None
+        if subscription_id and not existing:
+            raise HTTPException(404, "Subscription not found")
+        config = dict(data.config)
+        if existing and existing["kind"] == data.kind:
+            for key in ("feed_url", "bearer_token", "password"):
+                if not config.get(key):
+                    config[key] = existing["config"].get(key, "")
+        try:
+            data.config = validate_subscription(data.kind, config)
+            return db.save_subscription(data, subscription_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/admin/subscriptions", status_code=201, dependencies=[Depends(require_admin)])
+    def create_subscription(data: SubscriptionInput):
+        return save_subscription(data)
+
+    @app.put("/api/admin/subscriptions/{subscription_id}", dependencies=[Depends(require_admin)])
+    def update_subscription(subscription_id: str, data: SubscriptionInput):
+        return save_subscription(data, subscription_id)
+
+    @app.delete("/api/admin/subscriptions/{subscription_id}", dependencies=[Depends(require_admin)])
+    def delete_subscription(subscription_id: str):
+        if not db.delete_subscription(subscription_id):
+            raise HTTPException(404, "Subscription not found")
+        return {"deleted": True}
+
+    @app.post("/api/admin/subscriptions/{subscription_id}/check", dependencies=[Depends(require_admin)])
+    async def check_subscription(subscription_id: str):
+        existing = db.get_subscription(subscription_id)
+        if not existing:
+            raise HTTPException(404, "Subscription not found")
+        try:
+            return await poller.check(subscription_id)
+        except PollRateLimited as exc:
+            raise HTTPException(429, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     def save_channel(data: ChannelInput, channel_id: str | None = None):
         existing = db.get_channel(channel_id, include_config=True) if channel_id else None
         if channel_id and not existing:
@@ -200,7 +247,7 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     def delete_channel(channel_id: str):
         result = db.delete_channel(channel_id)
         if result == "used":
-            raise HTTPException(409, "Channel has delivery history; disable it instead")
+            raise HTTPException(409, "Channel has delivery history or subscriptions; disable it instead")
         if result == "missing":
             raise HTTPException(404, "Channel not found")
         return {"deleted": True}

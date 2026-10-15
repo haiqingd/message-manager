@@ -42,3 +42,17 @@ class MessageInput(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("Each channel may appear only once per message")
         return value
+
+
+class SubscriptionInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    kind: Literal["rss", "x", "imap"] = "rss"
+    enabled: bool = True
+    config: dict[str, object] = Field(default_factory=dict)
+    destinations: list[Destination] = Field(min_length=1, max_length=20)
+    poll_interval: int = Field(default=300, ge=60, le=86400)
+
+    @field_validator("destinations")
+    @classmethod
+    def distinct_destinations(cls, value):
+        return MessageInput.distinct_destinations(value)

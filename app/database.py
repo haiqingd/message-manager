@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 
-from .models import ChannelInput, MessageInput, RouteInput
+from .models import ChannelInput, MessageInput, RouteInput, SubscriptionInput
 from .senders import valid_email
 
 
@@ -63,6 +63,19 @@ class Database:
                 CREATE INDEX IF NOT EXISTS deliveries_due ON deliveries(status, next_attempt_at);
                 CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(message_id);
                 CREATE INDEX IF NOT EXISTS messages_created ON messages(created_at DESC);
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+                    enabled INTEGER NOT NULL, config_encrypted BLOB NOT NULL,
+                    destinations_json TEXT NOT NULL, poll_interval INTEGER NOT NULL,
+                    initialized INTEGER NOT NULL DEFAULT 0, state_json TEXT NOT NULL DEFAULT '{}',
+                    next_poll_at REAL NOT NULL, last_checked_at REAL, last_success_at REAL, last_error TEXT,
+                    created_at REAL NOT NULL, updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS subscription_entries (
+                    subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                    entry_id TEXT NOT NULL, PRIMARY KEY(subscription_id, entry_id)
+                );
+                CREATE INDEX IF NOT EXISTS subscriptions_due ON subscriptions(enabled, next_poll_at);
                 CREATE TABLE IF NOT EXISTS qq_routes (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL,
                     position INTEGER NOT NULL, event_types TEXT NOT NULL,
@@ -91,6 +104,12 @@ class Database:
                     UNIQUE(party_id, member_openid)
                 );
             """)
+            subscription_columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
+            if "last_success_at" not in subscription_columns:
+                conn.execute("ALTER TABLE subscriptions ADD COLUMN last_success_at REAL")
+                # Existing subscriptions start the new policy at the check time
+                # already shown to the user; subsequent failures preserve it.
+                conn.execute("UPDATE subscriptions SET last_success_at=last_checked_at WHERE initialized=1")
             if conn.execute("SELECT COUNT(*) FROM qq_routes").fetchone()[0] == 0:
                 conn.execute("INSERT INTO qq_routes VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                              (str(uuid.uuid4()), "兜底：自动创建渠道", 1, DEFAULT_ROUTE_POSITION,
@@ -135,6 +154,111 @@ class Database:
 
     def _decode(self, row):
         return json.loads(self.cipher.decrypt(row["config_encrypted"]))
+
+    def _subscription(self, row, include_config=False):
+        result = {key: row[key] for key in ("id", "name", "kind", "poll_interval", "next_poll_at",
+                  "last_checked_at", "last_success_at", "last_error", "created_at", "updated_at")}
+        result["enabled"] = bool(row["enabled"])
+        result["initialized"] = bool(row["initialized"])
+        result["destinations"] = json.loads(row["destinations_json"])
+        config = self._decode(row)
+        secrets = {"feed_url", "bearer_token", "password"}
+        if include_config:
+            result["config"] = config
+            result["state"] = json.loads(row["state_json"])
+        else:
+            result["config"] = {key: "" if key in secrets else value for key, value in config.items()}
+            result["configured_secrets"] = [key for key in secrets if config.get(key)]
+            result["feed_host"] = urlparse(str(config.get("feed_url") or "")).hostname
+        return result
+
+    def list_subscriptions(self, due_only=False):
+        with self.connect() as conn:
+            if due_only:
+                rows = conn.execute("SELECT * FROM subscriptions WHERE enabled=1 AND next_poll_at<=? ORDER BY next_poll_at", (time.time(),))
+            else:
+                rows = conn.execute("SELECT * FROM subscriptions ORDER BY created_at DESC")
+            return [self._subscription(row) for row in rows]
+
+    def get_subscription(self, subscription_id, include_config=False):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM subscriptions WHERE id=?", (subscription_id,)).fetchone()
+            return self._subscription(row, include_config) if row else None
+
+    def save_subscription(self, data: SubscriptionInput, subscription_id=None):
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            old = conn.execute("SELECT * FROM subscriptions WHERE id=?", (subscription_id,)).fetchone() if subscription_id else None
+            if subscription_id and not old:
+                return None
+            self.validate_destinations(data.destinations, conn)
+            now = time.time()
+            config = self.cipher.encrypt(json.dumps(data.config).encode())
+            destinations = json.dumps([item.model_dump() for item in data.destinations])
+            if old:
+                previous = self._decode(old)
+                # A changed source/filter starts a new baseline. Credential and routing
+                # changes preserve the cursor and all observed entries.
+                reset = (old["kind"] != data.kind or
+                         any(previous.get(key) != data.config.get(key) for key in
+                             ("feed_url", "username", "include_replies", "include_reposts", "provider")))
+                conn.execute("""UPDATE subscriptions SET name=?,kind=?,enabled=?,config_encrypted=?,
+                    destinations_json=?,poll_interval=?,next_poll_at=?,last_error=NULL,updated_at=? WHERE id=?""",
+                    (data.name, data.kind, int(data.enabled), config, destinations, data.poll_interval, now, now, subscription_id))
+                if reset:
+                    conn.execute("UPDATE subscriptions SET initialized=0,state_json='{}',last_checked_at=NULL,last_success_at=NULL WHERE id=?", (subscription_id,))
+                    conn.execute("DELETE FROM subscription_entries WHERE subscription_id=?", (subscription_id,))
+            else:
+                subscription_id = str(uuid.uuid4())
+                conn.execute("""INSERT INTO subscriptions
+                    (id,name,kind,enabled,config_encrypted,destinations_json,poll_interval,next_poll_at,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (subscription_id, data.name, data.kind, int(data.enabled), config, destinations, data.poll_interval, now, now, now))
+        return self.get_subscription(subscription_id)
+
+    def delete_subscription(self, subscription_id):
+        with self.connect() as conn:
+            return conn.execute("DELETE FROM subscriptions WHERE id=?", (subscription_id,)).rowcount > 0
+
+    def apply_subscription_entries(self, subscription, entries, state):
+        """Queue new messages and save observed IDs/cursor in the same transaction."""
+        from .models import Destination
+
+        count = 0
+        now = time.time()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM subscriptions WHERE id=?", (subscription["id"],)).fetchone()
+            if not row or row["updated_at"] != subscription["updated_at"] or not row["enabled"]:
+                return 0
+            window_end = subscription.get("window_end", now)
+            window_start = subscription.get("window_start", row["last_success_at"])
+            baseline = window_start is None
+            for entry in entries:
+                published_at = entry.get("published_at")
+                # Future entries must remain eligible for the next check.
+                # Undated entries cannot satisfy a strict time window.
+                if published_at is None or published_at > window_end:
+                    continue
+                observed = conn.execute("INSERT OR IGNORE INTO subscription_entries VALUES (?,?)", (row["id"], entry["id"]))
+                if not observed.rowcount or baseline or published_at <= window_start:
+                    continue
+                data = MessageInput(source=f"subscription:{row['id']}", title=entry["title"][:200],
+                                    body=entry["body"][:20000], idempotency_key=entry["id"],
+                                    destinations=[Destination(**item) for item in subscription["destinations"]])
+                _, created = self._insert_message(conn, data, now)
+                count += int(created)
+            conn.execute("""UPDATE subscriptions SET initialized=1,state_json=?,last_checked_at=?,last_success_at=?,last_error=NULL,
+                next_poll_at=? WHERE id=?""", (json.dumps(state), window_end, window_end, now + row["poll_interval"], row["id"]))
+        return count
+
+    def fail_subscription(self, subscription, error, retry_after=0):
+        now = time.time()
+        with self.connect() as conn:
+            conn.execute("""UPDATE subscriptions SET last_checked_at=?,last_error=?,next_poll_at=?
+                WHERE id=? AND updated_at=?""",
+                (subscription.get("window_end", now), str(error)[:500], now + max(subscription["poll_interval"], retry_after),
+                 subscription["id"], subscription["updated_at"]))
 
     def _channel(self, row, include_config=False):
         result = {key: row[key] for key in ("id", "name", "kind", "created_at", "updated_at")}
@@ -363,39 +487,49 @@ class Database:
             used = conn.execute("SELECT 1 FROM deliveries WHERE channel_id=? LIMIT 1", (channel_id,)).fetchone()
             if used:
                 return "used"
+            for row in conn.execute("SELECT destinations_json FROM subscriptions"):
+                if any(item["channel_id"] == channel_id for item in json.loads(row["destinations_json"])):
+                    return "used"
             cursor = conn.execute("DELETE FROM channels WHERE id=?", (channel_id,))
             return "deleted" if cursor.rowcount else "missing"
 
+    def validate_destinations(self, destinations, conn):
+        ids = [destination.channel_id for destination in destinations]
+        rows = conn.execute(f"SELECT id,kind,enabled,config_encrypted FROM channels WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
+        channels = {row["id"]: row for row in rows}
+        for destination in destinations:
+            row = channels.get(destination.channel_id)
+            if not row or not row["enabled"]:
+                raise ValueError(f"Channel {destination.channel_id} does not exist or is disabled")
+            if row["kind"] == "email" and not (destination.recipients or self._decode(row).get("default_recipients")):
+                raise ValueError(f"Email channel {destination.channel_id} has no recipients")
+            if row["kind"] == "email" and any(not valid_email(item) for item in destination.recipients):
+                raise ValueError("Invalid email recipient address")
+            if row["kind"] != "email" and destination.recipients:
+                raise ValueError("Recipients are only supported for email channels")
+            if row["kind"] == "qq" and not str(self._decode(row).get("group_openid") or "").strip():
+                raise ValueError(f"QQ channel {destination.channel_id} has no target OpenID; it only identifies the bot")
+
+    def _insert_message(self, conn, data, now):
+        if data.idempotency_key:
+            prior = conn.execute("SELECT id FROM messages WHERE source=? AND idempotency_key=?",
+                                 (data.source, data.idempotency_key)).fetchone()
+            if prior:
+                return prior["id"], False
+        self.validate_destinations(data.destinations, conn)
+        message_id = str(uuid.uuid4())
+        conn.execute("""INSERT INTO messages (id, source, title, body, idempotency_key, created_at)
+            VALUES (?,?,?,?,?,?)""", (message_id, data.source, data.title, data.body, data.idempotency_key, now))
+        for destination in data.destinations:
+            conn.execute("INSERT INTO deliveries VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                         (str(uuid.uuid4()), message_id, destination.channel_id, json.dumps(destination.recipients), "pending", 0, 3, now, None, None, now))
+        return message_id, True
+
     def create_message(self, data: MessageInput):
-        now = time.time()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if data.idempotency_key:
-                prior = conn.execute("SELECT id FROM messages WHERE source=? AND idempotency_key=?", (data.source, data.idempotency_key)).fetchone()
-                if prior:
-                    return self.get_message(prior["id"]), False
-            ids = [destination.channel_id for destination in data.destinations]
-            rows = conn.execute(f"SELECT id,kind,enabled,config_encrypted FROM channels WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
-            channels = {row["id"]: row for row in rows}
-            for destination in data.destinations:
-                row = channels.get(destination.channel_id)
-                if not row or not row["enabled"]:
-                    raise ValueError(f"Channel {destination.channel_id} does not exist or is disabled")
-                if row["kind"] == "email" and not (destination.recipients or self._decode(row).get("default_recipients")):
-                    raise ValueError(f"Email channel {destination.channel_id} has no recipients")
-                if row["kind"] == "email" and any(not valid_email(item) for item in destination.recipients):
-                    raise ValueError("Invalid email recipient address")
-                if row["kind"] != "email" and destination.recipients:
-                    raise ValueError("Recipients are only supported for email channels")
-                if row["kind"] == "qq" and not str(self._decode(row).get("group_openid") or "").strip():
-                    raise ValueError(f"QQ channel {destination.channel_id} has no target OpenID; it only identifies the bot")
-            message_id = str(uuid.uuid4())
-            conn.execute("""INSERT INTO messages (id, source, title, body, idempotency_key, created_at)
-                VALUES (?,?,?,?,?,?)""", (message_id, data.source, data.title, data.body, data.idempotency_key, now))
-            for destination in data.destinations:
-                conn.execute("INSERT INTO deliveries VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                             (str(uuid.uuid4()), message_id, destination.channel_id, json.dumps(destination.recipients), "pending", 0, 3, now, None, None, now))
-        return self.get_message(message_id), True
+            message_id, created = self._insert_message(conn, data, time.time())
+        return self.get_message(message_id), created
 
     def get_message(self, message_id):
         with self.connect() as conn:

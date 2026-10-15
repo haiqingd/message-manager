@@ -1,7 +1,7 @@
-const state = { token: sessionStorage.getItem('adminToken') || '', channels: [], messages: [], routes: [], qqEvents: [], offset: 0, total: 0, page: 'overview' };
+const state = { token: sessionStorage.getItem('adminToken') || '', channels: [], messages: [], routes: [], subscriptions: [], qqEvents: [], offset: 0, total: 0, page: 'overview' };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const names = { overview:'概览', compose:'发送测试', channels:'渠道管理', qqcb:'QQ 回调', messages:'发送记录', api:'API 接入' };
+const names = { overview:'概览', compose:'发送测试', channels:'渠道管理', subscriptions:'订阅管理', qqcb:'QQ 回调', messages:'发送记录', api:'API 接入' };
 const kindNames = { dingtalk:'钉钉机器人', feishu:'飞书机器人', qq:'QQ 机器人', email:'SMTP 邮件' };
 const kindIcons = { dingtalk:'◈', feishu:'◇', qq:'Q', email:'✉' };
 const statusNames = { sent:'已送达', pending:'待发送', sending:'发送中', failed:'发送失败' };
@@ -19,7 +19,7 @@ function toast(message) { const item=$('#toast'); item.textContent=message; item
 function formatTime(value) { return new Date(value*1000).toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
 function overallStatus(message) { const values=message.deliveries.map(item=>item.status); return values.includes('failed')?'failed':values.every(item=>item==='sent')?'sent':values.includes('sending')?'sending':'pending'; }
 function showPage(page) { state.page=page; document.querySelectorAll('.page').forEach(item=>item.classList.toggle('active',item.id===page)); document.querySelectorAll('.nav-item').forEach(item=>item.classList.toggle('active',item.dataset.page===page)); $('#current-page').textContent=names[page]; if(page==='api') renderApiExample(); else if(state.token) refresh().catch(error=>toast(`刷新失败：${error.message}`)); }
-async function refresh() { const [stats, channels, messages, routes, qqEvents] = await Promise.all([request('/api/admin/stats'),request('/api/admin/channels'),request(`/api/admin/messages?limit=20&offset=${state.offset}`),request('/api/admin/qq/routes'),request('/api/admin/qq/events?limit=50')]); state.channels=channels; state.messages=messages.items; state.total=messages.total; state.routes=routes; state.qqEvents=qqEvents.items; renderStats(stats); renderChannels(); renderMessages(); renderDestinations(); renderRoutes(); renderQqEvents(); renderApiExample(); }
+async function refresh() { const [stats, channels, messages, routes, qqEvents, subscriptions] = await Promise.all([request('/api/admin/stats'),request('/api/admin/channels'),request(`/api/admin/messages?limit=20&offset=${state.offset}`),request('/api/admin/qq/routes'),request('/api/admin/qq/events?limit=50'),request('/api/admin/subscriptions')]); state.channels=channels; state.messages=messages.items; state.total=messages.total; state.routes=routes; state.qqEvents=qqEvents.items; state.subscriptions=subscriptions; renderStats(stats); renderChannels(); renderMessages(); renderDestinations(); renderRoutes(); renderQqEvents(); renderSubscriptions(); renderApiExample(); }
 function renderStats(stats) { for(const key of ['channels','messages','sent','pending','failed']) $(`#stat-${key}`).textContent=stats[key]; }
 function renderChannels() {
   $('#channel-count').textContent=`${state.channels.length} 个渠道`;
@@ -27,6 +27,65 @@ function renderChannels() {
   $('#channel-preview').innerHTML=state.channels.length ? state.channels.slice(0,4).map(channel=>`<div class="preview-row"><span class="channel-icon ${channel.kind}">${kindIcons[channel.kind]}</span><div class="row-main"><strong>${escapeHtml(channel.name)}</strong><small>${kindNames[channel.kind]}</small></div><span class="status ${channel.enabled?'sent':'disabled'}">${channel.enabled?'正常':'停用'}</span></div>`).join('') : empty('添加渠道后，这里会显示状态。');
 }
 function empty(text) { return `<div class="empty"><span class="empty-icon">◇</span>${text}</div>`; }
+function renderSubscriptions() {
+  $('#subscription-count').textContent = `${state.subscriptions.length} 个订阅`;
+  $('#subscription-list').innerHTML = state.subscriptions.length ? state.subscriptions.map(item => {
+    const targets = item.destinations.map(destination => state.channels.find(channel => channel.id === destination.channel_id)?.name || '渠道已移除').join('、');
+    const source = item.kind === 'imap' ? `${item.config.provider === 'gmail' ? 'Gmail' : 'QQ 邮箱'} · ${item.config.username}` : item.kind === 'x' ? `X · @${item.config.username}` : `RSS · ${item.feed_host || ''}`;
+    const filters = item.kind === 'imap' ? `标题：${(item.config.subject_keywords || []).join(' / ') || '不限'}；发件人：${(item.config.senders || []).join(' / ') || '不限'} · ${item.config.match_mode === 'all' ? '全部满足' : '任一满足'}` : '';
+    return `<div class="subscription-item"><div class="channel-meta"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(source)} → ${escapeHtml(targets)}</small>${filters ? `<small>${escapeHtml(filters)}</small>` : ''}<small>每 ${item.poll_interval} 秒 · 最近检查：${item.last_checked_at ? formatTime(item.last_checked_at) : '尚未检查'}${item.enabled ? ` · 下次：${formatTime(item.next_poll_at)}` : ''}</small><small>${item.last_success_at ? `窗口起点（上次成功检查）：${formatTime(item.last_success_at)}` : '首次检查将建立时间基线'}</small>${item.last_error ? `<p class="delivery-error">${escapeHtml(item.last_error)}</p>` : ''}</div><span class="status ${!item.enabled ? 'disabled' : item.last_error ? 'failed' : 'sent'}">${!item.enabled ? '已停用' : item.last_error ? '检查失败' : '已启用'}</span><div class="channel-actions"><button class="text-button" data-check-subscription="${item.id}" ${!item.enabled ? 'disabled' : ''}>立即检查</button><button class="text-button" data-edit-subscription="${item.id}">编辑</button><button class="icon-button" data-delete-subscription="${item.id}" title="删除">×</button></div></div>`;
+  }).join('') : empty('添加一个 X 账号、RSS 源或邮箱，开始自动转发新内容。');
+}
+function renderSubscriptionFields(item) {
+  const kind = $('#subscription-kind').value;
+  const config = item?.kind === kind ? item.config : {};
+  const saved = key => item?.kind === kind && item.configured_secrets?.includes(key);
+  if (kind === 'imap') {
+    $('#subscription-fields').innerHTML = `<div class="field"><label for="subscription-provider">邮箱服务</label><select id="subscription-provider"><option value="qq" ${config.provider === 'gmail' ? '' : 'selected'}>QQ 邮箱</option><option value="gmail" ${config.provider === 'gmail' ? 'selected' : ''}>Gmail</option></select><small>通过 SSL/TLS 读取收件箱，不修改已读状态，不下载或转发附件。</small></div><div class="field"><label for="subscription-mail-user">邮箱地址 *</label><input id="subscription-mail-user" type="email" value="${escapeHtml(config.username || '')}" placeholder="name@qq.com 或 name@gmail.com" autocomplete="off" required></div><div class="field"><label for="subscription-mail-password">授权码 / 应用专用密码 *</label><input id="subscription-mail-password" type="password" autocomplete="new-password" placeholder="${saved('password') ? '已加密保存；留空保留原凭据' : 'QQ 授权码或 Gmail 应用专用密码'}" ${saved('password') ? '' : 'required'}><small>QQ：开启 IMAP/SMTP 后生成授权码。Gmail：开启两步验证后生成应用专用密码；部分受管理账号可能不可用。<a href="https://service.mail.qq.com/detail/0/339" target="_blank" rel="noopener">QQ 官方说明 ↗</a> · <a href="https://support.google.com/accounts/answer/185833?hl=zh-Hans" target="_blank" rel="noopener">Google 官方说明 ↗</a></small></div><div class="field"><label for="subscription-mail-subjects">标题包含</label><textarea id="subscription-mail-subjects" rows="3" placeholder="每行一个关键词，例如：账单、服务通知">${escapeHtml((config.subject_keywords || []).join('\n'))}</textarea><small>每行一项，命中其中任意关键词即可；忽略大小写。</small></div><div class="field"><label for="subscription-mail-senders">发件人匹配</label><textarea id="subscription-mail-senders" rows="3" placeholder="每行一个邮箱地址或发件人名称关键词">${escapeHtml((config.senders || []).join('\n'))}</textarea><small>邮箱地址精确匹配，名称按包含匹配；每行一项，忽略大小写。标题或发件人至少填写一类。</small></div><div class="field"><label for="subscription-mail-match">条件组合</label><select id="subscription-mail-match"><option value="any" ${config.match_mode === 'all' ? '' : 'selected'}>任一类条件满足（标题或发件人）</option><option value="all" ${config.match_mode === 'all' ? 'selected' : ''}>所有已填写的条件都满足</option></select><small>未填写的条件不参与匹配；修改过滤条件后，对下次检查时间窗口内的新邮件生效。</small></div>`;
+  } else if (kind === 'x') {
+    $('#subscription-fields').innerHTML = `<div class="field"><label for="subscription-username">X 账号 *</label><input id="subscription-username" value="${escapeHtml(config.username || '')}" placeholder="@username 或 https://x.com/username" required></div><div class="field"><label for="subscription-token">Bearer Token *</label><input id="subscription-token" type="password" autocomplete="off" placeholder="${saved('bearer_token') ? '已加密保存；留空保留原凭据' : 'X 开发者平台的 Bearer Token'}" ${saved('bearer_token') ? '' : 'required'}><small>X 官方 API 按用量计费，账号需有相应读取权限和可用额度。</small></div><div class="checkbox-row"><label><input id="subscription-replies" type="checkbox" ${config.include_replies ? 'checked' : ''}> 包含回复</label> <label><input id="subscription-reposts" type="checkbox" ${config.include_reposts ? 'checked' : ''}> 包含转帖</label></div>`;
+  } else {
+    $('#subscription-fields').innerHTML = `<div class="field"><label for="subscription-url">RSS / Atom 地址 *</label><input id="subscription-url" type="url" autocomplete="off" placeholder="${saved('feed_url') ? '已加密保存；留空保留原地址' : 'https://your-rss-service.example/feed'}" ${saved('feed_url') ? '' : 'required'}><small>${saved('feed_url') ? `已配置主机：${escapeHtml(item.feed_host)}。` : ''}X 账号需由第三方服务生成 RSS；请填写已验证可用的源地址。</small></div>`;
+  }
+}
+function openSubscriptionModal(id = null) {
+  const item = state.subscriptions.find(subscription => subscription.id === id);
+  $('#subscription-id').value = id || '';
+  $('#subscription-modal-title').textContent = item ? '编辑订阅' : '添加订阅';
+  $('#subscription-name').value = item?.name || '';
+  $('#subscription-kind').value = item?.kind || 'x';
+  $('#subscription-interval').value = item?.poll_interval || 300;
+  $('#subscription-enabled').checked = item?.enabled ?? true;
+  $('#subscription-error').textContent = '';
+  renderSubscriptionFields(item);
+  const available = state.channels.filter(channel => channel.enabled || item?.destinations.some(destination => destination.channel_id === channel.id));
+  $('#subscription-destinations').innerHTML = available.length ? available.map(channel => {
+    const destination = item?.destinations.find(target => target.channel_id === channel.id);
+    return `<div><label class="destination-option"><input type="checkbox" value="${channel.id}" data-kind="${channel.kind}" ${destination ? 'checked' : ''}><span>${escapeHtml(channel.name)}${channel.enabled ? '' : '（已停用）'}</span></label>${channel.kind === 'email' ? `<input data-subscription-recipients="${channel.id}" value="${escapeHtml((destination?.recipients || []).join(', '))}" placeholder="收件人；留空使用渠道默认地址" aria-label="${escapeHtml(channel.name)} 收件人">` : ''}</div>`;
+  }).join('') : empty('请先添加并启用发送渠道。');
+  $('#subscription-modal').classList.remove('hidden');
+  $('#subscription-name').focus();
+}
+function closeSubscriptionModal() { $('#subscription-modal').classList.add('hidden'); }
+async function saveSubscription(event) {
+  event.preventDefault();
+  const id = $('#subscription-id').value;
+  const kind = $('#subscription-kind').value;
+  let config;
+  if (kind === 'imap') {
+    const lines = selector => $(selector).value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    config = {provider: $('#subscription-provider').value, username: $('#subscription-mail-user').value.trim(), password: $('#subscription-mail-password').value.trim(), subject_keywords: lines('#subscription-mail-subjects'), senders: lines('#subscription-mail-senders'), match_mode: $('#subscription-mail-match').value};
+    if (!config.subject_keywords.length && !config.senders.length) { $('#subscription-error').textContent = '请至少填写一个标题关键词或发件人条件。'; return; }
+  } else if (kind === 'x') {
+    config = {username: $('#subscription-username').value.trim(), bearer_token: $('#subscription-token').value.trim(), include_replies: $('#subscription-replies').checked, include_reposts: $('#subscription-reposts').checked};
+  } else { config = {feed_url: $('#subscription-url').value.trim()}; }
+  const destinations = [...document.querySelectorAll('#subscription-destinations input[type="checkbox"]:checked')].map(input => ({channel_id: input.value, recipients: input.dataset.kind === 'email' ? document.querySelector(`[data-subscription-recipients="${input.value}"]`).value.split(',').map(value => value.trim()).filter(Boolean) : []}));
+  if (!destinations.length) { $('#subscription-error').textContent = '请至少选择一个转发渠道。'; return; }
+  try {
+    await request(id ? `/api/admin/subscriptions/${id}` : '/api/admin/subscriptions', {method: id ? 'PUT' : 'POST', body: JSON.stringify({name: $('#subscription-name').value.trim(), kind, enabled: $('#subscription-enabled').checked, config, destinations, poll_interval: Number($('#subscription-interval').value)})});
+    closeSubscriptionModal(); await refresh(); toast(id ? '订阅已更新' : '订阅已添加；首次检查将建立基线');
+  } catch (error) { $('#subscription-error').textContent = error.message; }
+}
 function renderRoutes() {
   $('#route-count').textContent=`${state.routes.length} 条规则`;
   $('#route-list').innerHTML=state.routes.length ? state.routes.map(route=>`<div class="channel-item"><div class="channel-meta"><strong>${escapeHtml(route.name)}</strong><small>${route.event_types.map(t=>qqEventNames[t]||t).join('、')} · ${qqChatNames[route.chat_type]}${route.openid?` · ${escapeHtml(route.openid)}`:''} → ${qqActionNames[route.action]}${route.action==='forward'?(route.configured_secrets?.includes('webhook_url')?'':'（未配置 URL）'):''}</small></div><span class="status ${route.enabled?'sent':'disabled'}">${route.enabled?'启用':'停用'}</span><div class="channel-actions"><button class="text-button" data-edit-route="${escapeHtml(route.id)}">编辑</button><button class="icon-button" data-delete-route="${escapeHtml(route.id)}" title="删除">×</button></div></div>`).join('') : empty('还没有路由规则；所有事件只会记录，不会触发任何插槽。');
@@ -136,4 +195,32 @@ $('#destination-options').addEventListener('change',()=>{$('#email-recipients-wr
 $('#channel-list').addEventListener('click',async event=>{const edit=event.target.closest('[data-edit]');const remove=event.target.closest('[data-delete]');const copy=event.target.closest('[data-copy-id]');if(edit)openChannelModal(edit.dataset.edit);if(copy){await navigator.clipboard.writeText(copy.dataset.copyId);toast('渠道 ID 已复制');}if(remove){const channel=state.channels.find(c=>c.id===remove.dataset.delete);if(!confirm(`删除渠道「${channel.name}」？已有发送记录的渠道无法删除，可改为停用。`))return;try{await request(`/api/admin/channels/${channel.id}`,{method:'DELETE'});await refresh();toast('渠道已删除');}catch(error){toast(error.message);}}});
 $('#message-list').addEventListener('click',async event=>{const retry=event.target.closest('[data-retry]');if(retry){event.stopPropagation();try{await request(`/api/admin/deliveries/${retry.dataset.retry}/retry`,{method:'POST'});await refresh();toast('已重新加入队列');}catch(error){toast(error.message);}return;}const head=event.target.closest('.message-head');if(head)head.parentElement.classList.toggle('expanded');});
 $('#refresh-messages').addEventListener('click',async()=>{await refresh();toast('记录已更新');});$('#prev-page').addEventListener('click',async()=>{state.offset=Math.max(0,state.offset-20);await refresh();});$('#next-page').addEventListener('click',async()=>{state.offset+=20;await refresh();});$('#copy-example').addEventListener('click',async()=>{await navigator.clipboard.writeText($('#api-example').textContent);toast('示例已复制');});
+$('#add-subscription').addEventListener('click', () => openSubscriptionModal());
+$('#close-subscription-modal').addEventListener('click', closeSubscriptionModal);
+$('#cancel-subscription-modal').addEventListener('click', closeSubscriptionModal);
+$('#subscription-modal').addEventListener('click', event => { if (event.target.id === 'subscription-modal') closeSubscriptionModal(); });
+$('#subscription-form').addEventListener('submit', saveSubscription);
+$('#subscription-kind').addEventListener('change', () => renderSubscriptionFields(state.subscriptions.find(item => item.id === $('#subscription-id').value)));
+$('#refresh-subscriptions').addEventListener('click', () => refresh().catch(error => toast(error.message)));
+$('#subscription-list').addEventListener('click', async event => {
+  const edit = event.target.closest('[data-edit-subscription]');
+  const remove = event.target.closest('[data-delete-subscription]');
+  const check = event.target.closest('[data-check-subscription]');
+  if (edit) openSubscriptionModal(edit.dataset.editSubscription);
+  try {
+    if (remove) {
+      const item = state.subscriptions.find(subscription => subscription.id === remove.dataset.deleteSubscription);
+      if (!confirm(`删除订阅「${item.name}」？已生成的发送记录会保留。`)) return;
+      await request(`/api/admin/subscriptions/${item.id}`, {method: 'DELETE'});
+      await refresh(); toast('订阅已删除');
+    }
+    if (check) {
+      check.disabled = true; check.textContent = '检查中…';
+      const result = await request(`/api/admin/subscriptions/${check.dataset.checkSubscription}/check`, {method: 'POST'});
+      await refresh();
+      toast(result.error || (result.baseline ? '已建立基线，之后将转发新内容' : `检查完成，${result.queued} 条新内容已加入发送队列`));
+    }
+  } catch (error) { toast(error.message); }
+  finally { if (check) { check.disabled = false; check.textContent = '立即检查'; } }
+});
 if(state.token)authenticate(state.token).catch(()=>{sessionStorage.removeItem('adminToken');state.token='';});
