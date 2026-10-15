@@ -102,8 +102,9 @@ function renderMessages() {
 }
 function renderDestinations() { const enabled=state.channels.filter(c=>c.enabled); $('#destination-options').innerHTML=enabled.length?enabled.map(channel=>`<label class="destination-option"><input type="checkbox" value="${escapeHtml(channel.id)}" data-kind="${channel.kind}"><span class="channel-icon ${channel.kind}">${kindIcons[channel.kind]}</span><span>${escapeHtml(channel.name)}<small>${kindNames[channel.kind]}</small></span></label>`).join(''):empty('没有可用渠道，请先添加并启用渠道。'); }
 function renderApiExample() {
-  const id = state.channels[0]?.id || '替换为渠道 ID';
+  const id = state.channels.find(channel => channel.enabled && (channel.kind !== 'qq' || channel.config?.group_openid))?.id || '替换为渠道 ID';
   const payload = { source: 'order-service', title: '服务状态提醒', body: '订单服务已恢复正常。', destinations: [{ channel_id: id }], idempotency_key: 'recovered-001' };
+  $('#api-channels-example').textContent = `curl ${location.origin}/api/v1/channels -H 'X-API-Key: 你的 MESSAGE_API_KEY'`;
   $('#api-example').textContent = `curl -X POST ${location.origin}/api/v1/messages -H 'Content-Type: application/json' -H 'X-API-Key: 你的 MESSAGE_API_KEY' -d '${JSON.stringify(payload, null, 2)}'`;
 }
 
@@ -195,6 +196,7 @@ $('#destination-options').addEventListener('change',()=>{$('#email-recipients-wr
 $('#channel-list').addEventListener('click',async event=>{const edit=event.target.closest('[data-edit]');const remove=event.target.closest('[data-delete]');const copy=event.target.closest('[data-copy-id]');if(edit)openChannelModal(edit.dataset.edit);if(copy){await navigator.clipboard.writeText(copy.dataset.copyId);toast('渠道 ID 已复制');}if(remove){const channel=state.channels.find(c=>c.id===remove.dataset.delete);if(!confirm(`删除渠道「${channel.name}」？已有发送记录的渠道无法删除，可改为停用。`))return;try{await request(`/api/admin/channels/${channel.id}`,{method:'DELETE'});await refresh();toast('渠道已删除');}catch(error){toast(error.message);}}});
 $('#message-list').addEventListener('click',async event=>{const retry=event.target.closest('[data-retry]');if(retry){event.stopPropagation();try{await request(`/api/admin/deliveries/${retry.dataset.retry}/retry`,{method:'POST'});await refresh();toast('已重新加入队列');}catch(error){toast(error.message);}return;}const head=event.target.closest('.message-head');if(head)head.parentElement.classList.toggle('expanded');});
 $('#refresh-messages').addEventListener('click',async()=>{await refresh();toast('记录已更新');});$('#prev-page').addEventListener('click',async()=>{state.offset=Math.max(0,state.offset-20);await refresh();});$('#next-page').addEventListener('click',async()=>{state.offset+=20;await refresh();});$('#copy-example').addEventListener('click',async()=>{await navigator.clipboard.writeText($('#api-example').textContent);toast('示例已复制');});
+$('#copy-channels-example').addEventListener('click',async()=>{await navigator.clipboard.writeText($('#api-channels-example').textContent);toast('渠道列表示例已复制');});
 $('#add-subscription').addEventListener('click', () => openSubscriptionModal());
 $('#close-subscription-modal').addEventListener('click', closeSubscriptionModal);
 $('#cancel-subscription-modal').addEventListener('click', closeSubscriptionModal);

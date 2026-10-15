@@ -65,7 +65,25 @@
 
         <section id="messages" class="page"><div class="page-heading"><div><p class="eyebrow">DELIVERY LOG</p><h1>发送记录</h1><p>追踪每条消息的发送结果，并重试失败投递。</p></div><button id="refresh-messages" class="button secondary">↻ 刷新记录</button></div><div class="panel"><div class="panel-heading"><div><h3>消息历史</h3><p>按提交时间从新到旧排序</p></div><span id="message-count" class="count-badge">0 条消息</span></div><div id="message-list" class="message-list"></div><div class="pagination"><button id="prev-page" class="button secondary small-button">上一页</button><span id="page-info">第 1 页</span><button id="next-page" class="button secondary small-button">下一页</button></div></div></section>
 
-        <section id="api" class="page"><div class="page-heading"><div><p class="eyebrow">DEVELOPER ACCESS</p><h1>API 接入</h1><p>让其他本地应用通过统一接口发送消息。</p></div><a class="button secondary" href="/docs" target="_blank" rel="noopener">查看交互式文档 ↗</a></div><div class="api-layout"><div class="panel api-panel"><div class="step-label">01 · 认证</div><h3>使用 API Key</h3><p>在请求头中加入 <code>X-API-Key</code>。密钥位于本地 <code>.env</code> 文件的 <code>MESSAGE_API_KEY</code>，请勿放入前端代码。</p><div class="step-label">02 · 发送</div><h3>提交消息</h3><p>向 <code>POST /api/v1/messages</code> 发送 JSON。一个请求可同时发往多个渠道。</p><div class="code-head"><span>cURL 示例</span><button id="copy-example" class="text-button">复制</button></div><pre id="api-example"></pre><div class="step-label">03 · 查询结果</div><h3>检查投递状态</h3><p>接口返回 <code>202</code> 和消息 ID。使用 <code>GET /api/v1/messages/{id}</code> 查询各渠道的投递状态。</p></div><div class="side-note"><div class="note-icon">⌘</div><h3>接入约定</h3><p>每个渠道都有固定的 ID，可在渠道管理中复制。建议业务应用为同一事件设置唯一的 <code>idempotency_key</code>，避免重复发送。</p><div class="note-line"></div><p>默认仅监听 <code>127.0.0.1</code>，端口可在 <code>.env</code> 中设置。跨机器部署时请配置 HTTPS 反向代理和访问控制。</p></div></div></section>
+        <section id="api" class="page">
+          <div class="page-heading"><div><p class="eyebrow">DEVELOPER ACCESS</p><h1>API 接入</h1><p>让其他应用通过统一接口获取渠道并发送消息。</p></div><a class="button secondary" href="/docs" target="_blank" rel="noopener">查看交互式文档 ↗</a></div>
+          <div class="api-layout"><div class="panel api-panel">
+            <div class="step-label">01 · 认证</div><h3>使用 API Key</h3><p>以下接口均在请求头中加入 <code>X-API-Key</code>，无需管理员令牌。密钥位于本地 <code>.env</code> 文件的 <code>MESSAGE_API_KEY</code>，请勿放入前端代码。未提供或提供错误的 API Key 时返回 <code>401</code>。</p>
+            <div class="step-label">02 · 获取渠道</div><h3>查询渠道列表</h3><p>调用 <code>GET /api/v1/channels</code> 获取渠道 ID，供发送消息时使用。接口返回 <code>200</code> 和 JSON 数组，按创建时间倒序排列；没有渠道时返回 <code>[]</code>。</p>
+            <div class="code-head"><span>获取渠道 · cURL 示例</span><button id="copy-channels-example" class="text-button">复制</button></div><pre id="api-channels-example"></pre>
+            <div class="code-head"><span>响应示例</span></div><pre>[
+  {
+    "id": "替换为渠道 ID",
+    "name": "运维通知",
+    "kind": "dingtalk",
+    "enabled": true
+  }
+]</pre>
+            <p>每项仅包含 <code>id</code>、<code>name</code>、<code>kind</code>、<code>enabled</code>。类型为 <code>dingtalk</code>、<code>feishu</code>、<code>qq</code> 或 <code>email</code>。列表包含已停用的渠道，发送前请筛选 <code>enabled: true</code>。渠道配置和凭据不会返回。</p>
+            <div class="step-label">03 · 发送</div><h3>提交消息</h3><p>向 <code>POST /api/v1/messages</code> 发送 JSON，将渠道 ID 填入 <code>destinations[].channel_id</code>。一个请求可同时发往多个渠道。</p><div class="code-head"><span>发送消息 · cURL 示例</span><button id="copy-example" class="text-button">复制</button></div><pre id="api-example"></pre>
+            <div class="step-label">04 · 查询结果</div><h3>检查投递状态</h3><p>接口返回 <code>202</code> 和消息 ID。使用 <code>GET /api/v1/messages/{id}</code> 查询各渠道的投递状态。</p>
+          </div><div class="side-note"><div class="note-icon">⌘</div><h3>接入约定</h3><p>每个渠道都有固定的 ID，可通过渠道列表接口获取，也可在渠道管理中复制。新增、修改和删除渠道需使用管理员令牌。QQ 渠道仅配置机器人身份、未配置目标 OpenID 时不能直接发送。</p><div class="note-line"></div><p>建议业务应用为同一事件设置唯一的 <code>idempotency_key</code>，避免重复发送。</p><div class="note-line"></div><p>默认仅监听 <code>127.0.0.1</code>，端口可在 <code>.env</code> 中设置。跨机器部署时请配置 HTTPS 反向代理和访问控制。</p></div></div>
+        </section>
       </div>
     </main>
   </div>
