@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .database import Database, ROUTE_SECRET_FIELDS, SECRET_FIELDS
-from .models import ChannelInput, MessageInput, RouteInput, SubscriptionInput
+from .models import ChannelInput, ChannelSummary, MessageInput, RouteInput, SubscriptionInput
 from .qq_callback import CallbackRejected, handle_callback, validate_route
 from .senders import send, validate_config, valid_email
 from .settings import Settings, get_settings
@@ -144,6 +144,10 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     @app.delete("/api/admin/qq/events", dependencies=[Depends(require_admin)])
     def clear_qq_events():
         return {"cleared": db.clear_qq_events()}
+
+    @app.get("/api/v1/channels", response_model=list[ChannelSummary], dependencies=[Depends(require_api_key)])
+    def public_channels():
+        return db.list_public_channels()
 
     @app.post("/api/v1/messages", status_code=202, dependencies=[Depends(require_api_key)])
     def submit_message(data: MessageInput):

@@ -277,6 +277,11 @@ class Database:
         with self.connect() as conn:
             return [self._channel(row) for row in conn.execute("SELECT * FROM channels ORDER BY created_at DESC")]
 
+    def list_public_channels(self):
+        with self.connect() as conn:
+            return [{**dict(row), "enabled": bool(row["enabled"])} for row in conn.execute(
+                "SELECT id,name,kind,enabled FROM channels ORDER BY created_at DESC")]
+
     def get_channel(self, channel_id, include_config=False):
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM channels WHERE id=?", (channel_id,)).fetchone()

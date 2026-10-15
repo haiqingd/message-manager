@@ -161,7 +161,22 @@ Gmail 使用 `"provider": "gmail"`，`password` 为应用专用密码；`match_m
 
 ## HTTP 接口
 
-先从渠道管理复制渠道 ID，调用：
+外部应用可使用与发送消息相同的 `MESSAGE_API_KEY` 获取渠道列表，无需管理员令牌：
+
+```bash
+curl https://message-sender.nas.haiqingd.top/api/v1/channels \
+  -H 'X-API-Key: <.env 中的 MESSAGE_API_KEY>'
+```
+
+接口返回 HTTP `200` 和 JSON 数组，每项仅包含 `id`、`name`、`kind`、`enabled`，按创建时间倒序排列；没有渠道时返回 `[]`。列表包含已停用的渠道，调用方应检查 `enabled`。不返回渠道配置、Webhook 地址、邮箱地址、QQ OpenID 或凭据。未提供或提供错误的 API Key 时返回 HTTP `401`。新增、修改和删除渠道仍需管理员令牌。
+
+例如：
+
+```json
+[{"id": "渠道 ID", "name": "运维通知", "kind": "dingtalk", "enabled": true}]
+```
+
+使用列表返回的渠道 ID（也可从渠道管理复制）发送消息：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/messages \

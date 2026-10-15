@@ -6,6 +6,13 @@ from pydantic import BaseModel, Field, field_validator
 ChannelType = Literal["dingtalk", "feishu", "qq", "email"]
 
 
+class ChannelSummary(BaseModel):
+    id: str
+    name: str
+    kind: ChannelType
+    enabled: bool
+
+
 class ChannelInput(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     kind: ChannelType

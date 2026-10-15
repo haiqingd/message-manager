@@ -64,6 +64,41 @@ def test_feishu_credentials_are_saved_but_not_echoed(tmp_path):
         assert saved["config"]["secret"] == "private-signing-key"
 
 
+def test_public_channel_list_auth_and_safe_fields(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        assert client.get("/api/v1/channels").status_code == 401
+        assert client.get("/api/v1/channels", headers={"X-API-Key": "invalid"}).status_code == 401
+        assert client.get("/api/v1/channels", headers=admin_headers()).status_code == 401
+        assert client.get("/api/v1/channels", headers=api_headers()).json() == []
+        channels = [
+            add_channel(client),
+            add_channel(client, "feishu"),
+            add_channel(client, "qq", {"app_id": "123456", "client_secret": "qq-secret", "group_openid": "private-openid"}),
+            add_channel(client, "email", {
+                "host": "smtp.example.com", "port": 587, "security": "starttls",
+                "from_address": "notify@example.com", "username": "private-user", "password": "smtp-secret",
+                "default_recipients": ["private@example.com"],
+            }),
+        ]
+        disabled = channels[-1]
+        response = client.put(f"/api/admin/channels/{disabled['id']}", headers=admin_headers(), json={
+            "name": disabled["name"], "kind": disabled["kind"], "enabled": False, "config": disabled["config"],
+        })
+        assert response.status_code == 200
+        disabled["enabled"] = False
+        response = client.get("/api/v1/channels", headers=api_headers())
+        assert response.status_code == 200
+        assert response.json() == [
+            {key: channel[key] for key in ("id", "name", "kind", "enabled")}
+            for channel in reversed(channels)
+        ]
+        assert client.get("/api/admin/channels", headers=api_headers()).status_code == 401
+        assert client.post("/api/admin/channels", headers=api_headers(), json={}).status_code == 401
+        assert client.put(f"/api/admin/channels/{disabled['id']}", headers=api_headers(), json={}).status_code == 401
+        assert client.delete(f"/api/admin/channels/{disabled['id']}", headers=api_headers()).status_code == 401
+
+
 def test_qq_credentials_are_saved_but_not_echoed(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:
